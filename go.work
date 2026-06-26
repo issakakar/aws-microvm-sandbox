@@ -1,0 +1,6 @@
+// Workspace uniting the two Go modules so root-relative package patterns
+// (./provisioner/..., ./harness/...) resolve for the Makefile targets.
+go 1.26.4
+
+use ./harness
+use ./provisioner

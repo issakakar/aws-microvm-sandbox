@@ -1,0 +1,55 @@
+# ---- secrets / local env (never commit) ----
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.tfvars
+.envrc
+aws-credentials*
+*.pem
+
+# ---- rust (in-VM manager) ----
+target/
+
+# ---- go (orchestrator / harness) ----
+/bin/
+/vendor/
+provisioner/dist/
+harness/results/
+# benchmark + image-metadata output (generated; carries account IDs / ARNs — keep local)
+/results/
+
+# ---- terraform (infra) ----
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# (.terraform.lock.hcl is intentionally committed — it pins provider versions)
+
+# ---- python / uv (tooling) ----
+.venv/
+__pycache__/
+*.pyc
+
+# ---- node / frontend (vite) ----
+node_modules/
+.wrangler/
+.vite/
+dist/
+.output/
+
+# ---- microvm image build artifacts (Dockerfile+app zips for S3) ----
+*.zip
+build/
+
+# ---- os / editor / logs ----
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# terraform plan artifacts
+infra/tfplan
+*.tfplan

@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# microvm-bench image — variant: BASE  (CPython 3.13 stdlib only)
+#   baseline minimumMemoryInMiB = 512  (set server-side in create-microvm-image;
+#   not a Docker concern — see images/BUILD-NOTES.md)
+#
+# Build context root MUST be microvm/  (so COPY manager/ forkserver/ resolve):
+#   docker buildx build --platform linux/arm64 \
+#       -f images/Dockerfile.base -t microvm-bench-base ./microvm
+#
+# AWS builds this server-side on Graviton (ARM64). Multi-stage, snapshot-optimized
+# per images/BUILD-NOTES.md. No compilers/headers reach the final image.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Rust builder — compile the manager (ENTRYPOINT) to a release binary.
+# -----------------------------------------------------------------------------
+FROM --platform=linux/arm64 rust:1.96-bookworm AS manager-builder
+WORKDIR /build/manager
+
+# Cache deps first: copy manifests, fetch, then copy sources.
+COPY manager/Cargo.toml manager/Cargo.lock* ./
+COPY manager/src ./src
+# Static-ish musl-free release build; strip happens via the linker flag below.
+# RUSTFLAGS keeps the binary lean; LTO/strip configured here so the final binary
+# is minimal regardless of the crate's [profile.release] settings.
+ENV CARGO_TERM_COLOR=never
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/manager/target \
+    RUSTFLAGS="-C strip=symbols -C opt-level=3" \
+    cargo build --release --locked 2>/dev/null || \
+    RUSTFLAGS="-C strip=symbols -C opt-level=3" cargo build --release ; \
+    # Resolve the produced binary regardless of crate bin name; canonicalize to
+    # /out/microvm-manager (the name the final ENTRYPOINT + BUILD-NOTES pin).
+    mkdir -p /out ; \
+    bin="$(find target/release -maxdepth 1 -type f -executable \
+            ! -name '*.so' ! -name '*.d' | head -n1)" ; \
+    test -n "$bin" || { echo 'no manager binary produced' >&2; exit 1; } ; \
+    cp "$bin" /out/microvm-manager ; \
+    strip --strip-unneeded /out/microvm-manager || true
+
+# -----------------------------------------------------------------------------
+# Stage 2: Python builder — standalone CPython 3.13 via uv (base = stdlib only).
+# -----------------------------------------------------------------------------
+FROM --platform=linux/arm64 debian:bookworm-slim AS py-builder
+# uv: fast, currently-maintained installer; brings a managed standalone CPython
+# (python-build-standalone) so the final image needs no system Python.
+COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_PREFERENCE=only-managed
+WORKDIR /app
+# elfutils -> eu-strip (alignment-safe .so shake-down); binutils -> strip fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends binutils elfutils \
+    && rm -rf /var/lib/apt/lists/*
+# Create a venv from a managed standalone CPython 3.13. base = no third-party deps.
+RUN uv venv --python 3.13 /app/venv
+ENV VIRTUAL_ENV=/app/venv \
+    PATH=/app/venv/bin:$PATH
+
+# ---- HARD snapshot shake-down (images/BUILD-NOTES.md) ----------------------
+COPY images/shrink.sh /usr/local/bin/shrink.sh
+RUN chmod +x /usr/local/bin/shrink.sh && MVB_VARIANT=base /usr/local/bin/shrink.sh
+
+# -----------------------------------------------------------------------------
+# Stage 3: Final — snapshot-safe AL2023 minimal base (patched OpenSSL).
+# -----------------------------------------------------------------------------
+FROM --platform=linux/arm64 public.ecr.aws/lambda/microvms:al2023-minimal AS final
+
+# Snapshot/thread hygiene + variant identity (images/BUILD-NOTES.md levers 6 & 7).
+ENV OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    MPLBACKEND=Agg \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MVB_VARIANT=base \
+    FORKSERVER_PY=/app/forkserver/forkserver.py \
+    VIRTUAL_ENV=/app/venv \
+    PATH=/app/venv/bin:/var/lang/bin:/usr/local/bin:/usr/bin:/bin
+
+WORKDIR /app
+
+# The managed standalone CPython lives under /opt/python and the venv symlinks
+# into it; copy both so the interpreter resolves at runtime.
+COPY --from=py-builder /opt/python /opt/python
+COPY --from=py-builder /app/venv  /app/venv
+
+# Manager binary (ENTRYPOINT) + Python fork-server + samples.
+COPY --from=manager-builder /out/microvm-manager /usr/local/bin/microvm-manager
+COPY forkserver/forkserver.py /app/forkserver/forkserver.py
+COPY samples/ /app/samples/
+
+EXPOSE 8080
+# The manager binds :8080, supervises the fork-server over the UDS, and serves
+# the lifecycle hooks. It reads FORKSERVER_PY / MVB_VARIANT from the env above.
+ENTRYPOINT ["/usr/local/bin/microvm-manager"]

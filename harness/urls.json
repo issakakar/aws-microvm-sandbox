@@ -1,0 +1,4 @@
+{
+  "use1_url": "https://<provisioner-function-url>.lambda-url.us-east-1.on.aws",
+  "usw2_url": "https://<provisioner-function-url>.lambda-url.us-west-2.on.aws"
+}
